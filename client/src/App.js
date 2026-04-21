@@ -22,7 +22,17 @@ ChartJS.register(
 
 const API = 'http://localhost:5000/api';
 
-// ─── DATE HELPERS ───────────────────────────────────────────
+// ─── ALAN SINAVI DERS DAĞILIMI ───────────────────────────────
+const ALAN_LESSONS = [
+  { name: 'Matematik', questions: 30, color: '#6366f1' },
+  { name: 'Türkçe',    questions: 30, color: '#ec4899' },
+  { name: 'Tarih',     questions: 27, color: '#f59e0b' },
+  { name: 'Coğrafya',  questions: 18, color: '#10b981' },
+  { name: 'Vatandaşlık', questions: 9, color: '#3b82f6' },
+];
+const TOTAL_ALAN_QUESTIONS = ALAN_LESSONS.reduce((a, l) => a + l.questions, 0);
+
+// ─── DATE HELPERS ────────────────────────────────────────────
 const fmt = (d) => d.toISOString().split('T')[0];
 const getWeekDates = (offset = 0) => {
   const now = new Date();
@@ -37,6 +47,88 @@ const getWeekDates = (offset = 0) => {
 };
 const DAY_NAMES = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'];
 const MONTH_NAMES = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
+
+// ─── GLOBAL POMODORO STATE ────────────────────────────────────
+// Stored outside component so it survives re-renders / tab switches
+const pomodoroState = {
+  running: false,
+  phase: 'work',
+  timeLeft: 25 * 60,
+  modeIdx: 0,
+  workedMinutes: 0,
+  intervalId: null,
+  listeners: new Set(),
+  notify() { this.listeners.forEach(fn => fn({ ...this })); },
+  start(onSessionSave) {
+    if (this.running) return;
+    this.running = true;
+    this.notify();
+    const MODES = [{ work: 25, rest: 5 }, { work: 50, rest: 10 }];
+    this.intervalId = setInterval(() => {
+      this.timeLeft -= 1;
+      if (this.timeLeft <= 0) {
+        clearInterval(this.intervalId);
+        this.running = false;
+        playBell();
+        const mode = MODES[this.modeIdx];
+        if (this.phase === 'work') {
+          const worked = mode.work;
+          this.workedMinutes += worked;
+          onSessionSave && onSessionSave(worked);
+          this.phase = 'rest';
+          this.timeLeft = mode.rest * 60;
+        } else {
+          this.phase = 'work';
+          this.timeLeft = MODES[this.modeIdx].work * 60;
+        }
+      }
+      this.notify();
+    }, 1000);
+  },
+  pause() {
+    clearInterval(this.intervalId);
+    this.running = false;
+    this.notify();
+  },
+  reset(modeIdx) {
+    clearInterval(this.intervalId);
+    const MODES = [{ work: 25, rest: 5 }, { work: 50, rest: 10 }];
+    this.running = false;
+    this.phase = 'work';
+    this.modeIdx = modeIdx !== undefined ? modeIdx : this.modeIdx;
+    this.timeLeft = MODES[this.modeIdx].work * 60;
+    this.notify();
+  }
+};
+
+function playBell() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 880;
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.5, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.5);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 1.5);
+    // Second ring
+    setTimeout(() => {
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.frequency.value = 660;
+      osc2.type = 'sine';
+      gain2.gain.setValueAtTime(0.4, ctx.currentTime);
+      gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.5);
+      osc2.start(ctx.currentTime);
+      osc2.stop(ctx.currentTime + 1.5);
+    }, 400);
+  } catch(e) {}
+}
 
 // ─── THEME ──────────────────────────────────────────────────
 const themes = {
@@ -78,11 +170,10 @@ const themes = {
   }
 };
 
-// ─── MAIN APP ───────────────────────────────────────────────
+// ─── MAIN APP ────────────────────────────────────────────────
 export default function App() {
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('kpss-dark') === 'true');
   const [tab, setTab] = useState('dashboard');
-
   const t = darkMode ? themes.dark : themes.light;
 
   useEffect(() => {
@@ -129,6 +220,7 @@ export default function App() {
       backgroundColor: active ? t.accentLight : 'transparent',
       color: active ? t.accent : t.textSecondary,
       transition: 'all 0.2s',
+      position: 'relative',
     }),
     content: { padding: '24px', maxWidth: '1400px', margin: '0 auto' },
     card: {
@@ -155,6 +247,7 @@ export default function App() {
         {navItems.map(item => (
           <button key={item.id} style={css.navBtn(tab === item.id)} onClick={() => setTab(item.id)}>
             {item.label}
+            {item.id === 'pomodoro' && <PomodoroNavIndicator t={t} />}
           </button>
         ))}
         <div style={{ marginLeft: 'auto' }}>
@@ -187,7 +280,26 @@ export default function App() {
   );
 }
 
-// ─── DASHBOARD ──────────────────────────────────────────────
+// ─── POMODORO NAV INDICATOR ──────────────────────────────────
+function PomodoroNavIndicator({ t }) {
+  const [state, setState] = useState({ running: pomodoroState.running, phase: pomodoroState.phase });
+  useEffect(() => {
+    const fn = (s) => setState({ running: s.running, phase: s.phase });
+    pomodoroState.listeners.add(fn);
+    return () => pomodoroState.listeners.delete(fn);
+  }, []);
+  if (!state.running) return null;
+  return (
+    <span style={{
+      position: 'absolute', top: '4px', right: '4px',
+      width: '8px', height: '8px', borderRadius: '50%',
+      backgroundColor: state.phase === 'work' ? t.accent : t.success,
+      animation: 'pulse 1.5s infinite',
+    }} />
+  );
+}
+
+// ─── DASHBOARD ───────────────────────────────────────────────
 function Dashboard({ t, css }) {
   const [lessons, setLessons] = useState([]);
   const [sessions, setSessions] = useState([]);
@@ -215,11 +327,10 @@ function Dashboard({ t, css }) {
     return () => clearInterval(iv);
   }, []);
 
-  const totalCompleted = lessons.reduce((a, l) => a + l.topics.filter(t => t.isCompleted).length, 0);
+  const totalCompleted = lessons.reduce((a, l) => a + l.topics.filter(tp => tp.isCompleted).length, 0);
   const totalTopics = lessons.reduce((a, l) => a + l.topics.length, 0);
   const progress = totalTopics > 0 ? Math.round((totalCompleted / totalTopics) * 100) : 0;
 
-  // Weekly study hours for bar chart
   const week = getWeekDates(0);
   const weekLabels = week.map(d => DAY_NAMES[d.getDay() === 0 ? 6 : d.getDay() - 1]);
   const weekData = week.map(d => {
@@ -273,7 +384,6 @@ function Dashboard({ t, css }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      {/* Stats Row */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
         {statCard('📚', 'Tamamlanan Konu', `${totalCompleted}/${totalTopics}`, t.accent)}
         {statCard('⏱', 'Toplam Çalışma', `${totalStudyHours.toFixed(1)}s`, t.success)}
@@ -281,9 +391,7 @@ function Dashboard({ t, css }) {
         {statCard('🎯', 'Son Net', lastExam ? lastExam.net.toFixed(2) : '-', t.danger)}
       </div>
 
-      {/* Charts + Timer */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-        {/* Doughnut */}
         <div style={{ ...css.card, textAlign: 'center' }}>
           <h3 style={{ margin: '0 0 16px', color: t.text, fontSize: '16px', fontWeight: 700 }}>Müfredat İlerlemesi</h3>
           <div style={{ maxWidth: '200px', margin: '0 auto', position: 'relative' }}>
@@ -295,7 +403,6 @@ function Dashboard({ t, css }) {
           </div>
         </div>
 
-        {/* Weekly bar */}
         <div style={{ ...css.card }}>
           <h3 style={{ margin: '0 0 16px', color: t.text, fontSize: '16px', fontWeight: 700 }}>Bu Hafta Çalışma (Saat)</h3>
           <Bar data={barData} options={{
@@ -309,7 +416,6 @@ function Dashboard({ t, css }) {
         </div>
       </div>
 
-      {/* Countdown */}
       <div style={{
         ...css.card,
         background: t.timerBg,
@@ -330,25 +436,24 @@ function Dashboard({ t, css }) {
   );
 }
 
-// ─── SYLLABUS ───────────────────────────────────────────────
+// ─── SYLLABUS ────────────────────────────────────────────────
 function Syllabus({ t, css }) {
   const [lessons, setLessons] = useState([]);
   const [selected, setSelected] = useState(null);
 
-  const fetch = () => axios.get(`${API}/lessons`).then(r => {
+  const fetchData = () => axios.get(`${API}/lessons`).then(r => {
     setLessons(r.data);
     if (selected) setSelected(r.data.find(l => l._id === selected._id) || null);
   }).catch(() => {});
 
-  useEffect(() => { fetch(); }, []);
+  useEffect(() => { fetchData(); }, []);
 
   const toggle = async (lessonId, topicId, cur) => {
     await axios.patch(`${API}/lessons/${lessonId}/topics/${topicId}`, { isCompleted: !cur });
-    fetch();
+    fetchData();
   };
 
-  const progress = (topics) => !topics?.length ? 0 : Math.round(topics.filter(t => t.isCompleted).length / topics.length * 100);
-
+  const progress = (topics) => !topics?.length ? 0 : Math.round(topics.filter(tp => tp.isCompleted).length / topics.length * 100);
   const LESSON_COLORS = ['#6366f1','#8b5cf6','#ec4899','#f59e0b','#10b981','#3b82f6'];
 
   if (selected) return (
@@ -372,7 +477,7 @@ function Syllabus({ t, css }) {
                 border: `2px solid ${topic.isCompleted ? t.success : t.border}`,
                 backgroundColor: topic.isCompleted ? t.success : 'transparent',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, transition: 'all 0.2s',
+                flexShrink: 0,
               }}>
                 {topic.isCompleted && <span style={{ color: '#fff', fontSize: '13px' }}>✓</span>}
               </div>
@@ -406,7 +511,7 @@ function Syllabus({ t, css }) {
               <div style={{ height: '100%', width: `${pct}%`, backgroundColor: color, borderRadius: '3px', transition: 'width 0.5s' }} />
             </div>
             <div style={{ marginTop: '10px', fontSize: '12px', color: t.textSecondary }}>
-              {lesson.topics.filter(t => t.isCompleted).length} / {lesson.topics.length} konu tamamlandı
+              {lesson.topics.filter(tp => tp.isCompleted).length} / {lesson.topics.length} konu tamamlandı
             </div>
           </div>
         );
@@ -415,7 +520,7 @@ function Syllabus({ t, css }) {
   );
 }
 
-// ─── WEEKLY PLANNER ─────────────────────────────────────────
+// ─── WEEKLY PLANNER ──────────────────────────────────────────
 function WeeklyPlanner({ t, css }) {
   const [weekOffset, setWeekOffset] = useState(0);
   const [tasks, setTasks] = useState([]);
@@ -450,14 +555,11 @@ function WeeklyPlanner({ t, css }) {
     fetchTasks();
   };
 
-  const priorityColors = { low: t.success, medium: t.warning, high: t.danger };
   const today = fmt(new Date());
-
   const rangeLabel = `${week[0].getDate()} ${MONTH_NAMES[week[0].getMonth()]} — ${week[6].getDate()} ${MONTH_NAMES[week[6].getMonth()]}`;
 
   return (
     <div>
-      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '20px' }}>
         <button onClick={() => setWeekOffset(w => w - 1)} style={{ ...btnStyle(t), padding: '8px 12px' }}>‹</button>
         <h3 style={{ margin: 0, color: t.text, fontWeight: 700, fontSize: '16px', flex: 1, textAlign: 'center' }}>{rangeLabel}</h3>
@@ -465,7 +567,6 @@ function WeeklyPlanner({ t, css }) {
         <button onClick={() => setWeekOffset(0)} style={{ ...btnStyle(t), fontSize: '13px' }}>Bugün</button>
       </div>
 
-      {/* Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '12px' }}>
         {week.map((date, i) => {
           const ds = fmt(date);
@@ -473,8 +574,7 @@ function WeeklyPlanner({ t, css }) {
           const isToday = ds === today;
           return (
             <div key={ds} style={{
-              ...css.card,
-              padding: '12px',
+              ...css.card, padding: '12px',
               border: `2px solid ${isToday ? t.accent : t.border}`,
               backgroundColor: isToday ? t.accentLight : t.surface,
               minHeight: '140px',
@@ -495,34 +595,26 @@ function WeeklyPlanner({ t, css }) {
                 <div key={task._id} style={{
                   display: 'flex', alignItems: 'flex-start', gap: '6px',
                   padding: '6px 8px', borderRadius: '8px', marginBottom: '4px',
-                  backgroundColor: task.color + '18',
-                  borderLeft: `3px solid ${task.color}`,
-                  position: 'relative',
+                  backgroundColor: task.color + '18', borderLeft: `3px solid ${task.color}`,
                 }}>
                   <input type="checkbox" checked={task.isCompleted} onChange={() => toggleTask(task._id, task.isCompleted)}
                     style={{ marginTop: '2px', cursor: 'pointer', accentColor: task.color }} />
                   <span style={{ fontSize: '12px', color: task.isCompleted ? t.textMuted : t.text, textDecoration: task.isCompleted ? 'line-through' : 'none', flex: 1, lineHeight: 1.3 }}>
                     {task.title}
                   </span>
-                  <button onClick={() => deleteTask(task._id)} style={{ background: 'none', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: '12px', padding: '0', lineHeight: 1 }}>×</button>
+                  <button onClick={() => deleteTask(task._id)} style={{ background: 'none', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: '12px', padding: '0' }}>×</button>
                 </div>
               ))}
 
               {addingDay === ds && (
                 <div style={{ marginTop: '8px' }}>
-                  <input
-                    autoFocus
-                    value={newTask.title}
-                    onChange={e => setNewTask(p => ({ ...p, title: e.target.value }))}
-                    onKeyDown={e => e.key === 'Enter' && addTask(ds)}
-                    placeholder="Görev ekle..."
-                    style={{ ...inputStyle(t), fontSize: '12px', padding: '6px 8px', marginBottom: '6px' }}
-                  />
+                  <input autoFocus value={newTask.title} onChange={e => setNewTask(p => ({ ...p, title: e.target.value }))}
+                    onKeyDown={e => e.key === 'Enter' && addTask(ds)} placeholder="Görev ekle..."
+                    style={{ ...inputStyle(t), fontSize: '12px', padding: '6px 8px', marginBottom: '6px' }} />
                   <div style={{ display: 'flex', gap: '4px' }}>
                     {['#6366f1','#10b981','#f59e0b','#ef4444','#8b5cf6'].map(c => (
                       <div key={c} onClick={() => setNewTask(p => ({ ...p, color: c }))}
-                        style={{ width: '18px', height: '18px', borderRadius: '50%', backgroundColor: c, cursor: 'pointer', border: newTask.color === c ? `2px solid ${t.text}` : '2px solid transparent' }}
-                      />
+                        style={{ width: '18px', height: '18px', borderRadius: '50%', backgroundColor: c, cursor: 'pointer', border: newTask.color === c ? `2px solid ${t.text}` : '2px solid transparent' }} />
                     ))}
                   </div>
                   <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
@@ -539,26 +631,28 @@ function WeeklyPlanner({ t, css }) {
   );
 }
 
-// ─── POMODORO TIMER ─────────────────────────────────────────
+// ─── POMODORO TIMER (global state, persists across tabs) ─────
 function PomodoroTimer({ t, css }) {
   const MODES = [
     { label: '25/5 Klasik', work: 25, rest: 5 },
     { label: '50/10 Derin', work: 50, rest: 10 },
   ];
-  const [modeIdx, setModeIdx] = useState(0);
-  const [phase, setPhase] = useState('work'); // 'work' | 'rest'
-  const [timeLeft, setTimeLeft] = useState(MODES[0].work * 60);
-  const [running, setRunning] = useState(false);
+  const [state, setState] = useState({
+    running: pomodoroState.running,
+    phase: pomodoroState.phase,
+    timeLeft: pomodoroState.timeLeft,
+    modeIdx: pomodoroState.modeIdx,
+  });
   const [sessions, setSessions] = useState([]);
   const [todayMinutes, setTodayMinutes] = useState(0);
-  const intervalRef = useRef(null);
-  const workedRef = useRef(0);
-
-  const mode = MODES[modeIdx];
-  const total = phase === 'work' ? mode.work * 60 : mode.rest * 60;
-  const pct = ((total - timeLeft) / total) * 100;
 
   useEffect(() => {
+    const fn = (s) => setState({ running: s.running, phase: s.phase, timeLeft: s.timeLeft, modeIdx: s.modeIdx });
+    pomodoroState.listeners.add(fn);
+    return () => pomodoroState.listeners.delete(fn);
+  }, []);
+
+  const fetchSessions = useCallback(() => {
     axios.get(`${API}/study-sessions`).then(r => {
       setSessions(r.data);
       const today = fmt(new Date());
@@ -566,46 +660,25 @@ function PomodoroTimer({ t, css }) {
     }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    setTimeLeft(MODES[modeIdx].work * 60);
-    setPhase('work');
-    setRunning(false);
-    workedRef.current = 0;
-  }, [modeIdx]);
+  useEffect(() => { fetchSessions(); }, [fetchSessions]);
 
-  useEffect(() => {
-    if (running) {
-      intervalRef.current = setInterval(() => {
-        setTimeLeft(prev => {
-          if (prev <= 1) {
-            clearInterval(intervalRef.current);
-            setRunning(false);
-            if (phase === 'work') {
-              const worked = mode.work;
-              workedRef.current += worked;
-              const today = fmt(new Date());
-              axios.post(`${API}/study-sessions`, { date: today, minutes: worked }).then(r => {
-                setSessions(p => [...p, r.data]);
-                setTodayMinutes(p => p + worked);
-              });
-              setPhase('rest');
-              return mode.rest * 60;
-            } else {
-              setPhase('work');
-              return mode.work * 60;
-            }
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(intervalRef.current);
-  }, [running, phase, mode]);
+  const handleStart = () => {
+    pomodoroState.start((minutes) => {
+      const today = fmt(new Date());
+      axios.post(`${API}/study-sessions`, { date: today, minutes }).then(() => fetchSessions());
+    });
+  };
 
-  const mins = Math.floor(timeLeft / 60);
-  const secs = timeLeft % 60;
+  const handleModeChange = (idx) => {
+    pomodoroState.reset(idx);
+  };
 
-  // Weekly chart
+  const mins = Math.floor(state.timeLeft / 60);
+  const secs = state.timeLeft % 60;
+  const mode = MODES[state.modeIdx];
+  const total = state.phase === 'work' ? mode.work * 60 : mode.rest * 60;
+  const pct = ((total - state.timeLeft) / total) * 100;
+
   const week = getWeekDates(0);
   const weekData = week.map(d => {
     const ds = fmt(d);
@@ -617,11 +690,10 @@ function PomodoroTimer({ t, css }) {
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', alignItems: 'start' }}>
-      {/* Timer */}
       <div style={{ ...css.card, textAlign: 'center' }}>
         <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginBottom: '24px' }}>
           {MODES.map((m, i) => (
-            <button key={i} onClick={() => setModeIdx(i)} style={{ ...btnStyle(t, modeIdx === i), fontSize: '13px' }}>
+            <button key={i} onClick={() => handleModeChange(i)} style={{ ...btnStyle(t, state.modeIdx === i), fontSize: '13px' }}>
               {m.label}
             </button>
           ))}
@@ -631,15 +703,15 @@ function PomodoroTimer({ t, css }) {
           <svg width="220" height="220" style={{ transform: 'rotate(-90deg)' }}>
             <circle cx="110" cy="110" r="90" fill="none" stroke={t.border} strokeWidth="10" />
             <circle cx="110" cy="110" r="90" fill="none"
-              stroke={phase === 'work' ? t.accent : t.success}
+              stroke={state.phase === 'work' ? t.accent : t.success}
               strokeWidth="10" strokeDasharray={circumference}
               strokeDashoffset={strokeDash} strokeLinecap="round"
               style={{ transition: 'stroke-dashoffset 1s linear' }}
             />
           </svg>
           <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ fontSize: '13px', fontWeight: 700, color: phase === 'work' ? t.accent : t.success, letterSpacing: '2px', marginBottom: '4px' }}>
-              {phase === 'work' ? '🎯 ODAK' : '☕ MOLA'}
+            <div style={{ fontSize: '13px', fontWeight: 700, color: state.phase === 'work' ? t.accent : t.success, letterSpacing: '2px', marginBottom: '4px' }}>
+              {state.phase === 'work' ? '🎯 ODAK' : '☕ MOLA'}
             </div>
             <div style={{ fontSize: '48px', fontWeight: 800, color: t.text, letterSpacing: '-2px', fontVariantNumeric: 'tabular-nums' }}>
               {String(mins).padStart(2,'0')}:{String(secs).padStart(2,'0')}
@@ -648,18 +720,14 @@ function PomodoroTimer({ t, css }) {
         </div>
 
         <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
-          <button onClick={() => setRunning(r => !r)} style={{
+          <button onClick={state.running ? () => pomodoroState.pause() : handleStart} style={{
             padding: '14px 36px', borderRadius: '12px', border: 'none', cursor: 'pointer',
             backgroundColor: t.accent, color: '#fff', fontSize: '16px', fontWeight: 700,
             boxShadow: `0 4px 14px ${t.accent}50`,
           }}>
-            {running ? '⏸ Durdur' : '▶ Başlat'}
+            {state.running ? '⏸ Durdur' : '▶ Başlat'}
           </button>
-          <button onClick={() => {
-            setRunning(false);
-            setPhase('work');
-            setTimeLeft(mode.work * 60);
-          }} style={{ ...btnStyle(t), padding: '14px 20px', fontSize: '14px' }}>
+          <button onClick={() => pomodoroState.reset()} style={{ ...btnStyle(t), padding: '14px 20px', fontSize: '14px' }}>
             ↺
           </button>
         </div>
@@ -670,7 +738,6 @@ function PomodoroTimer({ t, css }) {
         </div>
       </div>
 
-      {/* Weekly Stats */}
       <div style={{ ...css.card }}>
         <h3 style={{ margin: '0 0 20px', color: t.text, fontSize: '16px', fontWeight: 700 }}>Haftalık Çalışma Süresi</h3>
         <Bar
@@ -716,7 +783,26 @@ function ExamTracker({ t, css }) {
   const [examType, setExamType] = useState('genel');
   const [results, setResults] = useState([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ date: fmt(new Date()), examType: 'genel', examName: '', correct: '', wrong: '', empty: '', totalQuestions: 120 });
+  const [selectedLesson, setSelectedLesson] = useState(null); // for alan lesson detail
+
+  // Form state
+  const emptyLessonScores = () => ALAN_LESSONS.reduce((a, l) => ({ ...a, [l.name]: { correct: '', wrong: '' } }), {});
+  const [form, setForm] = useState({
+    date: fmt(new Date()),
+    examName: '',
+    // genel
+    correct: '', wrong: '', empty: '', totalQuestions: 120,
+    // alan
+    lessonScores: emptyLessonScores(),
+    // hata günlüğü
+    errorTopics: {},
+  });
+
+  // Error log: per lesson, list of topics
+  const [alanLessonsData, setAlanLessonsData] = useState([]); // from API
+  useEffect(() => {
+    axios.get(`${API}/lessons`).then(r => setAlanLessonsData(r.data)).catch(() => {});
+  }, []);
 
   const fetchResults = useCallback(() => {
     axios.get(`${API}/exam-results?examType=${examType}`).then(r => setResults(r.data)).catch(() => {});
@@ -724,12 +810,47 @@ function ExamTracker({ t, css }) {
 
   useEffect(() => { fetchResults(); }, [fetchResults]);
 
+  const calcAlanNet = (scores) => {
+    return ALAN_LESSONS.reduce((total, l) => {
+      const c = Number(scores[l.name]?.correct || 0);
+      const w = Number(scores[l.name]?.wrong || 0);
+      return total + (c - w / 4);
+    }, 0);
+  };
+
+  const calcAlanTotals = (scores) => {
+    let c = 0, w = 0;
+    ALAN_LESSONS.forEach(l => {
+      c += Number(scores[l.name]?.correct || 0);
+      w += Number(scores[l.name]?.wrong || 0);
+    });
+    return { correct: c, wrong: w, empty: TOTAL_ALAN_QUESTIONS - c - w };
+  };
+
   const submit = async () => {
-    const c = Number(form.correct), w = Number(form.wrong);
-    const net = c - w / 4;
-    await axios.post(`${API}/exam-results`, { ...form, examType, correct: c, wrong: w, empty: Number(form.empty), net });
+    let payload;
+    if (examType === 'genel') {
+      const c = Number(form.correct), w = Number(form.wrong);
+      payload = {
+        date: form.date, examType, examName: form.examName,
+        correct: c, wrong: w, empty: Number(form.empty),
+        net: c - w / 4, totalQuestions: Number(form.totalQuestions),
+        lessonScores: {}, errorTopics: form.errorTopics,
+      };
+    } else {
+      const net = calcAlanNet(form.lessonScores);
+      const totals = calcAlanTotals(form.lessonScores);
+      payload = {
+        date: form.date, examType, examName: form.examName,
+        correct: totals.correct, wrong: totals.wrong, empty: totals.empty,
+        net, totalQuestions: TOTAL_ALAN_QUESTIONS,
+        lessonScores: form.lessonScores,
+        errorTopics: form.errorTopics,
+      };
+    }
+    await axios.post(`${API}/exam-results`, payload);
     setShowForm(false);
-    setForm({ date: fmt(new Date()), examType, examName: '', correct: '', wrong: '', empty: '', totalQuestions: 120 });
+    setForm({ date: fmt(new Date()), examName: '', correct: '', wrong: '', empty: '', totalQuestions: 120, lessonScores: emptyLessonScores(), errorTopics: {} });
     fetchResults();
   };
 
@@ -739,32 +860,144 @@ function ExamTracker({ t, css }) {
   };
 
   const sorted = [...results].sort((a, b) => a.date.localeCompare(b.date));
-  const lineData = {
-    labels: sorted.map(r => r.examName || r.date),
-    datasets: [{
-      label: 'Net',
-      data: sorted.map(r => r.net),
-      borderColor: t.accent,
-      backgroundColor: t.accent + '20',
-      fill: true,
-      tension: 0.4,
-      pointRadius: 5,
-      pointBackgroundColor: t.accent,
-      pointBorderColor: t.surface,
-      pointBorderWidth: 2,
-    }]
-  };
-
   const best = results.length ? Math.max(...results.map(r => r.net)) : 0;
   const avg = results.length ? results.reduce((a, r) => a + r.net, 0) / results.length : 0;
   const last = results.length ? results[results.length - 1].net : 0;
 
+  // Ders bazlı istatistik (sadece alan için)
+  const getLessonStats = (lessonName) => {
+    const filtered = results.filter(r => r.lessonScores && r.lessonScores[lessonName]);
+    if (!filtered.length) return { avg: 0, best: 0, last: 0, count: filtered.length };
+    const nets = filtered.map(r => {
+      const c = Number(r.lessonScores[lessonName]?.correct || 0);
+      const w = Number(r.lessonScores[lessonName]?.wrong || 0);
+      return c - w / 4;
+    });
+    return {
+      avg: nets.reduce((a, n) => a + n, 0) / nets.length,
+      best: Math.max(...nets),
+      last: nets[nets.length - 1],
+      count: filtered.length,
+      nets,
+      dates: filtered.map(r => r.examName || r.date),
+    };
+  };
+
+  // Hata analizi: tüm denemeler için
+  const getAllErrorTopics = () => {
+    const map = {};
+    results.forEach(r => {
+      if (!r.errorTopics) return;
+      Object.entries(r.errorTopics).forEach(([lesson, topics]) => {
+        topics.forEach(topic => {
+          const key = `${lesson} — ${topic}`;
+          map[key] = (map[key] || 0) + 1;
+        });
+      });
+    });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  };
+
+  const errorTopicsList = getAllErrorTopics();
+
+  // Alan ders detay view
+  if (selectedLesson && examType === 'alan') {
+    const stats = getLessonStats(selectedLesson.name);
+    const lessonResults = results.filter(r => r.lessonScores && r.lessonScores[selectedLesson.name]);
+    const lineData = {
+      labels: stats.dates || [],
+      datasets: [{
+        label: 'Net',
+        data: stats.nets || [],
+        borderColor: selectedLesson.color,
+        backgroundColor: selectedLesson.color + '20',
+        fill: true, tension: 0.4, pointRadius: 5,
+        pointBackgroundColor: selectedLesson.color,
+        pointBorderColor: t.surface, pointBorderWidth: 2,
+      }]
+    };
+    return (
+      <div>
+        <button onClick={() => setSelectedLesson(null)} style={{ background: 'none', border: 'none', color: t.accent, cursor: 'pointer', fontWeight: 700, fontSize: '14px', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          ← Geri Dön
+        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div style={{ ...css.card }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '20px' }}>
+              <div style={{ width: '48px', height: '48px', borderRadius: '12px', backgroundColor: selectedLesson.color + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px' }}>📘</div>
+              <div>
+                <h2 style={{ margin: 0, color: t.text }}>{selectedLesson.name}</h2>
+                <span style={{ fontSize: '13px', color: t.textSecondary }}>{selectedLesson.questions} soru • {stats.count} deneme</span>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '16px' }}>
+              {[
+                { label: 'Ortalama Net', value: stats.avg.toFixed(2), color: t.accent, icon: '📊' },
+                { label: 'En İyi Net',   value: stats.best.toFixed(2), color: t.warning, icon: '🏆' },
+                { label: 'Son Net',      value: stats.last.toFixed(2), color: t.success, icon: '🎯' },
+              ].map(s => (
+                <div key={s.label} style={{ padding: '16px', borderRadius: '12px', backgroundColor: t.surfaceAlt, textAlign: 'center' }}>
+                  <div style={{ fontSize: '24px', marginBottom: '4px' }}>{s.icon}</div>
+                  <div style={{ fontSize: '24px', fontWeight: 800, color: s.color }}>{s.value}</div>
+                  <div style={{ fontSize: '12px', color: t.textSecondary }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {stats.nets?.length > 1 && (
+            <div style={css.card}>
+              <h3 style={{ margin: '0 0 16px', color: t.text, fontSize: '16px', fontWeight: 700 }}>Net Gelişim</h3>
+              <Line data={lineData} options={{
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                  y: { grid: { color: t.border }, ticks: { color: t.textSecondary } },
+                  x: { grid: { display: false }, ticks: { color: t.textSecondary } },
+                }
+              }} />
+            </div>
+          )}
+
+          <div style={css.card}>
+            <h3 style={{ margin: '0 0 16px', color: t.text, fontSize: '16px', fontWeight: 700 }}>Deneme Detayları</h3>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+              <thead>
+                <tr>
+                  {['Tarih','Deneme','Doğru','Yanlış','Net'].map(h => (
+                    <th key={h} style={{ padding: '10px 12px', textAlign: 'left', color: t.textSecondary, fontSize: '12px', fontWeight: 700, borderBottom: `1px solid ${t.border}` }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[...lessonResults].reverse().map(r => {
+                  const c = Number(r.lessonScores[selectedLesson.name]?.correct || 0);
+                  const w = Number(r.lessonScores[selectedLesson.name]?.wrong || 0);
+                  const net = c - w / 4;
+                  return (
+                    <tr key={r._id} style={{ borderBottom: `1px solid ${t.border}` }}>
+                      <td style={{ padding: '12px', color: t.textSecondary, fontSize: '13px' }}>{r.date}</td>
+                      <td style={{ padding: '12px', color: t.text, fontWeight: 600 }}>{r.examName || '-'}</td>
+                      <td style={{ padding: '12px', color: t.success, fontWeight: 700 }}>{c}</td>
+                      <td style={{ padding: '12px', color: t.danger, fontWeight: 700 }}>{w}</td>
+                      <td style={{ padding: '12px', color: selectedLesson.color, fontWeight: 800, fontSize: '16px' }}>{net.toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Tabs + Add */}
-      <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
         {['genel', 'alan'].map(type => (
-          <button key={type} onClick={() => setExamType(type)} style={{ ...btnStyle(t, examType === type), textTransform: 'capitalize', fontSize: '14px' }}>
+          <button key={type} onClick={() => setExamType(type)} style={{ ...btnStyle(t, examType === type), fontSize: '14px' }}>
             {type === 'genel' ? '🎓 Genel Yetenek/Kültür' : '📐 Alan Bilgisi'}
           </button>
         ))}
@@ -777,8 +1010,8 @@ function ExamTracker({ t, css }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '16px' }}>
         {[
           { label: 'En Yüksek Net', value: best.toFixed(2), icon: '🏆', color: t.warning },
-          { label: 'Ortalama Net', value: avg.toFixed(2), icon: '📊', color: t.accent },
-          { label: 'Son Net', value: last.toFixed(2), icon: '🎯', color: t.success },
+          { label: 'Ortalama Net',  value: avg.toFixed(2),  icon: '📊', color: t.accent },
+          { label: 'Son Net',       value: last.toFixed(2), icon: '🎯', color: t.success },
         ].map(s => (
           <div key={s.label} style={{ ...css.card, textAlign: 'center' }}>
             <div style={{ fontSize: '28px', marginBottom: '6px' }}>{s.icon}</div>
@@ -788,11 +1021,54 @@ function ExamTracker({ t, css }) {
         ))}
       </div>
 
+      {/* ALAN: Ders Bazlı Kartlar */}
+      {examType === 'alan' && results.length > 0 && (
+        <div>
+          <h3 style={{ margin: '0 0 16px', color: t.text, fontSize: '16px', fontWeight: 700 }}>📘 Ders Bazlı Analiz</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '14px' }}>
+            {ALAN_LESSONS.map(lesson => {
+              const stats = getLessonStats(lesson.name);
+              const maxNet = lesson.questions;
+              const pct = maxNet > 0 ? Math.min(100, (stats.avg / maxNet) * 100) : 0;
+              return (
+                <div key={lesson.name}
+                  onClick={() => setSelectedLesson(lesson)}
+                  style={{
+                    ...css.card, cursor: 'pointer', padding: '18px',
+                    border: `1px solid ${lesson.color}30`,
+                    transition: 'transform 0.18s, box-shadow 0.18s',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 24px ${lesson.color}25`; }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = t.cardShadow; }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
+                    <div style={{ width: '36px', height: '36px', borderRadius: '10px', backgroundColor: lesson.color + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px' }}>📘</div>
+                    <span style={{ fontSize: '12px', color: t.textMuted, fontWeight: 600 }}>{lesson.questions} soru</span>
+                  </div>
+                  <div style={{ fontWeight: 700, color: t.text, fontSize: '15px', marginBottom: '4px' }}>{lesson.name}</div>
+                  <div style={{ fontSize: '24px', fontWeight: 800, color: lesson.color, marginBottom: '8px' }}>
+                    {stats.count > 0 ? stats.avg.toFixed(2) : '—'}
+                  </div>
+                  <div style={{ fontSize: '11px', color: t.textSecondary, marginBottom: '8px' }}>Ort. Net {stats.count > 0 ? `• ${stats.count} deneme` : '• Henüz deneme yok'}</div>
+                  <div style={{ height: '5px', backgroundColor: t.border, borderRadius: '3px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${pct}%`, backgroundColor: lesson.color, borderRadius: '3px', transition: 'width 0.5s' }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Add Form */}
       {showForm && (
         <div style={{ ...css.card }}>
-          <h3 style={{ margin: '0 0 16px', color: t.text }}>Yeni Deneme Ekle</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '12px' }}>
+          <h3 style={{ margin: '0 0 16px', color: t.text }}>
+            {examType === 'genel' ? 'Genel Yetenek/Kültür Denemesi' : 'Alan Bilgisi Denemesi'} Ekle
+          </h3>
+
+          {/* Common fields */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px,1fr))', gap: '12px', marginBottom: '16px' }}>
             <div>
               <label style={labelStyle(t)}>Tarih</label>
               <input type="date" value={form.date} onChange={e => setForm(p => ({ ...p, date: e.target.value }))} style={inputStyle(t)} />
@@ -801,29 +1077,145 @@ function ExamTracker({ t, css }) {
               <label style={labelStyle(t)}>Deneme Adı</label>
               <input placeholder="ör: İSEM Deneme 1" value={form.examName} onChange={e => setForm(p => ({ ...p, examName: e.target.value }))} style={inputStyle(t)} />
             </div>
-            <div>
-              <label style={labelStyle(t)}>Doğru</label>
-              <input type="number" placeholder="0" value={form.correct} onChange={e => setForm(p => ({ ...p, correct: e.target.value }))} style={inputStyle(t)} />
-            </div>
-            <div>
-              <label style={labelStyle(t)}>Yanlış</label>
-              <input type="number" placeholder="0" value={form.wrong} onChange={e => setForm(p => ({ ...p, wrong: e.target.value }))} style={inputStyle(t)} />
-            </div>
-            <div>
-              <label style={labelStyle(t)}>Boş</label>
-              <input type="number" placeholder="0" value={form.empty} onChange={e => setForm(p => ({ ...p, empty: e.target.value }))} style={inputStyle(t)} />
-            </div>
-            <div>
-              <label style={labelStyle(t)}>Toplam Soru</label>
-              <input type="number" value={form.totalQuestions} onChange={e => setForm(p => ({ ...p, totalQuestions: e.target.value }))} style={inputStyle(t)} />
-            </div>
           </div>
-          {form.correct !== '' && form.wrong !== '' && (
-            <div style={{ marginTop: '12px', padding: '10px 14px', borderRadius: '10px', backgroundColor: t.accentLight, color: t.accent, fontWeight: 700, fontSize: '14px' }}>
-              Net: {(Number(form.correct) - Number(form.wrong) / 4).toFixed(2)}
+
+          {examType === 'genel' ? (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px,1fr))', gap: '12px' }}>
+              <div>
+                <label style={labelStyle(t)}>Doğru</label>
+                <input type="number" placeholder="0" value={form.correct} onChange={e => setForm(p => ({ ...p, correct: e.target.value }))} style={inputStyle(t)} />
+              </div>
+              <div>
+                <label style={labelStyle(t)}>Yanlış</label>
+                <input type="number" placeholder="0" value={form.wrong} onChange={e => setForm(p => ({ ...p, wrong: e.target.value }))} style={inputStyle(t)} />
+              </div>
+              <div>
+                <label style={labelStyle(t)}>Boş</label>
+                <input type="number" placeholder="0" value={form.empty} onChange={e => setForm(p => ({ ...p, empty: e.target.value }))} style={inputStyle(t)} />
+              </div>
+              <div>
+                <label style={labelStyle(t)}>Toplam Soru</label>
+                <input type="number" value={form.totalQuestions} onChange={e => setForm(p => ({ ...p, totalQuestions: e.target.value }))} style={inputStyle(t)} />
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ marginBottom: '12px', color: t.textSecondary, fontSize: '13px', fontWeight: 600 }}>Derse Göre Doğru / Yanlış Girin</div>
+              <div style={{ display: 'grid', gap: '10px' }}>
+                {ALAN_LESSONS.map(lesson => {
+                  const c = Number(form.lessonScores[lesson.name]?.correct || 0);
+                  const w = Number(form.lessonScores[lesson.name]?.wrong || 0);
+                  const net = c - w / 4;
+                  return (
+                    <div key={lesson.name} style={{
+                      display: 'grid', gridTemplateColumns: '140px 1fr 1fr auto',
+                      alignItems: 'center', gap: '10px', padding: '10px 14px',
+                      borderRadius: '10px', backgroundColor: t.surfaceAlt,
+                      borderLeft: `4px solid ${lesson.color}`,
+                    }}>
+                      <span style={{ fontWeight: 700, color: t.text, fontSize: '14px' }}>{lesson.name}</span>
+                      <div>
+                        <label style={{ ...labelStyle(t), marginBottom: '3px' }}>Doğru / {lesson.questions}</label>
+                        <input type="number" min="0" max={lesson.questions} placeholder="0"
+                          value={form.lessonScores[lesson.name]?.correct || ''}
+                          onChange={e => setForm(p => ({ ...p, lessonScores: { ...p.lessonScores, [lesson.name]: { ...p.lessonScores[lesson.name], correct: e.target.value } } }))}
+                          style={{ ...inputStyle(t), padding: '6px 10px' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ ...labelStyle(t), marginBottom: '3px' }}>Yanlış</label>
+                        <input type="number" min="0" max={lesson.questions} placeholder="0"
+                          value={form.lessonScores[lesson.name]?.wrong || ''}
+                          onChange={e => setForm(p => ({ ...p, lessonScores: { ...p.lessonScores, [lesson.name]: { ...p.lessonScores[lesson.name], wrong: e.target.value } } }))}
+                          style={{ ...inputStyle(t), padding: '6px 10px' }}
+                        />
+                      </div>
+                      <div style={{ textAlign: 'center', minWidth: '50px' }}>
+                        <div style={{ fontSize: '11px', color: t.textMuted, marginBottom: '2px' }}>Net</div>
+                        <div style={{ fontSize: '16px', fontWeight: 800, color: lesson.color }}>{net.toFixed(1)}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Total preview */}
+              <div style={{ marginTop: '12px', padding: '12px 16px', borderRadius: '10px', backgroundColor: t.accentLight, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ color: t.textSecondary, fontSize: '13px', fontWeight: 600 }}>Toplam Net:</span>
+                <span style={{ fontWeight: 800, fontSize: '20px', color: t.accent }}>{calcAlanNet(form.lessonScores).toFixed(2)}</span>
+              </div>
             </div>
           )}
-          <div style={{ display: 'flex', gap: '10px', marginTop: '16px' }}>
+
+          {/* Hata Günlüğü */}
+          <div style={{ marginTop: '20px' }}>
+            <h4 style={{ margin: '0 0 10px', color: t.text, fontSize: '14px', fontWeight: 700 }}>📌 Hata Günlüğü — Yanlış Yapılan Konular</h4>
+            <div style={{ display: 'grid', gap: '10px' }}>
+              {(examType === 'alan' ? ALAN_LESSONS : [{ name: 'Genel', color: t.accent }]).map(lesson => {
+                const lessonTopics = examType === 'alan'
+                  ? (alanLessonsData.find(l => l.name === lesson.name)?.topics || [])
+                  : [];
+                const selected = form.errorTopics[lesson.name] || [];
+                return (
+                  <div key={lesson.name} style={{ padding: '12px', borderRadius: '10px', backgroundColor: t.surfaceAlt, borderLeft: `4px solid ${lesson.color || t.accent}` }}>
+                    <div style={{ fontWeight: 700, color: t.text, fontSize: '13px', marginBottom: '8px' }}>{lesson.name}</div>
+                    {examType === 'alan' && lessonTopics.length > 0 ? (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        {lessonTopics.map(topic => {
+                          const isSelected = selected.includes(topic.title);
+                          return (
+                            <button key={topic._id}
+                              onClick={() => {
+                                const next = isSelected
+                                  ? selected.filter(t => t !== topic.title)
+                                  : [...selected, topic.title];
+                                setForm(p => ({ ...p, errorTopics: { ...p.errorTopics, [lesson.name]: next } }));
+                              }}
+                              style={{
+                                padding: '4px 10px', borderRadius: '20px', border: `1px solid ${isSelected ? lesson.color : t.border}`,
+                                backgroundColor: isSelected ? lesson.color + '25' : 'transparent',
+                                color: isSelected ? lesson.color : t.textSecondary,
+                                cursor: 'pointer', fontSize: '12px', fontWeight: isSelected ? 700 : 400,
+                                transition: 'all 0.15s',
+                              }}>
+                              {topic.title}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <input
+                        placeholder="Konu adı yazın, Enter ile ekle..."
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && e.target.value.trim()) {
+                            const val = e.target.value.trim();
+                            const next = [...selected, val];
+                            setForm(p => ({ ...p, errorTopics: { ...p.errorTopics, [lesson.name]: next } }));
+                            e.target.value = '';
+                          }
+                        }}
+                        style={{ ...inputStyle(t), fontSize: '13px', padding: '7px 10px', marginBottom: '6px' }}
+                      />
+                    )}
+                    {selected.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginTop: '6px' }}>
+                        {selected.map(tp => (
+                          <span key={tp} style={{ padding: '3px 10px', borderRadius: '20px', backgroundColor: t.danger + '20', color: t.danger, fontSize: '12px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            {tp}
+                            <button onClick={() => {
+                              const next = selected.filter(x => x !== tp);
+                              setForm(p => ({ ...p, errorTopics: { ...p.errorTopics, [lesson.name]: next } }));
+                            }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: t.danger, padding: 0, fontSize: '13px', lineHeight: 1 }}>×</button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
             <button onClick={submit} style={{ ...btnStyle(t, true), fontSize: '14px' }}>Kaydet</button>
             <button onClick={() => setShowForm(false)} style={{ ...btnStyle(t), fontSize: '14px' }}>İptal</button>
           </div>
@@ -834,7 +1226,18 @@ function ExamTracker({ t, css }) {
       {sorted.length > 1 && (
         <div style={css.card}>
           <h3 style={{ margin: '0 0 16px', color: t.text, fontSize: '16px', fontWeight: 700 }}>Net Gelişim Grafiği</h3>
-          <Line data={lineData} options={{
+          <Line data={{
+            labels: sorted.map(r => r.examName || r.date),
+            datasets: [{
+              label: 'Net',
+              data: sorted.map(r => r.net),
+              borderColor: t.accent,
+              backgroundColor: t.accent + '20',
+              fill: true, tension: 0.4, pointRadius: 5,
+              pointBackgroundColor: t.accent,
+              pointBorderColor: t.surface, pointBorderWidth: 2,
+            }]
+          }} options={{
             responsive: true,
             plugins: { legend: { display: false } },
             scales: {
@@ -842,6 +1245,35 @@ function ExamTracker({ t, css }) {
               x: { grid: { display: false }, ticks: { color: t.textSecondary } },
             }
           }} />
+        </div>
+      )}
+
+      {/* Hata Analizi */}
+      {errorTopicsList.length > 0 && (
+        <div style={css.card}>
+          <h3 style={{ margin: '0 0 16px', color: t.text, fontSize: '16px', fontWeight: 700 }}>🔴 En Çok Hata Yapılan Konular</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {errorTopicsList.slice(0, 10).map(([topic, count], idx) => {
+              const maxCount = errorTopicsList[0][1];
+              const pct = (count / maxCount) * 100;
+              const colors = ['#ef4444','#f97316','#f59e0b','#84cc16','#22c55e'];
+              const color = colors[Math.min(idx, colors.length - 1)];
+              return (
+                <div key={topic} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <span style={{ fontSize: '13px', fontWeight: 700, color: t.textMuted, minWidth: '20px', textAlign: 'right' }}>#{idx+1}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '13px', color: t.text, fontWeight: 600 }}>{topic}</span>
+                      <span style={{ fontSize: '12px', fontWeight: 800, color }}>{count} hata</span>
+                    </div>
+                    <div style={{ height: '6px', backgroundColor: t.border, borderRadius: '3px', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, backgroundColor: color, borderRadius: '3px', transition: 'width 0.5s' }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -889,7 +1321,7 @@ function ExamTracker({ t, css }) {
   );
 }
 
-// ─── HELPERS ────────────────────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────
 const btnStyle = (t, active = false) => ({
   padding: '10px 18px', borderRadius: '10px',
   border: `1px solid ${active ? t.accent : t.border}`,
